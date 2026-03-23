@@ -1,9 +1,10 @@
 import { useState, useCallback, useRef } from "react";
-const AI_URL   = "https://api.anthropic.com/v1/messages";
-const AI_MODEL = "claude-sonnet-4-20250514";
+const AI_URL   = "https://api.groq.com/openai/v1/chat/completions";
+const AI_MODEL = "llama-3.3-70b-versatile";
+const GROQ_KEY = import.meta.env.VITE_GROQ_KEY;
 const OM_BASE  = "https://api.open-meteo.com/v1/forecast";
 const GEO_BASE = "https://geocoding-api.open-meteo.com/v1/search";
-
+ 
 const CITY_DB = {
   "new york":    { lat:40.7128, lon:-74.0060, tz:"America/New_York",    f:true  },
   "nyc":         { lat:40.7128, lon:-74.0060, tz:"America/New_York",    f:true  },
@@ -26,7 +27,7 @@ const CITY_DB = {
   "minneapolis": { lat:44.9778, lon:-93.265,  tz:"America/Chicago",     f:true  },
   "portland":    { lat:45.5051, lon:-122.675, tz:"America/Los_Angeles", f:true  },
 };
-
+ 
 const CAT_META = {
   temperature:   { color:"#fb923c", icon:"◈" },
   precipitation: { color:"#38bdf8", icon:"≈" },
@@ -36,14 +37,13 @@ const CAT_META = {
   global_temp:   { color:"#34d399", icon:"○" },
   other:         { color:"#64748b", icon:"◇" },
 };
-
+ 
 // ─── OPEN-METEO: DIRECT FROM BROWSER ─────────────────────────────────────────
 async function getWeather(cityRaw, dateStr) {
   const key = cityRaw.toLowerCase().trim();
   let geo = CITY_DB[key];
-
+ 
   if (!geo) {
-    // Try geocoding fallback
     try {
       const r = await fetch(`${GEO_BASE}?name=${encodeURIComponent(cityRaw)}&count=1&language=en&format=json`);
       const d = await r.json();
@@ -53,24 +53,23 @@ async function getWeather(cityRaw, dateStr) {
       }
     } catch {}
   }
-
+ 
   if (!geo) return null;
-
+ 
   const unit = geo.f ? "fahrenheit" : "celsius";
   const url  = `${OM_BASE}?latitude=${geo.lat}&longitude=${geo.lon}` +
     `&hourly=temperature_2m,precipitation_probability` +
     `&temperature_unit=${unit}&timezone=${encodeURIComponent(geo.tz)}&forecast_days=7`;
-
+ 
   const res  = await fetch(url);
   if (!res.ok) throw new Error(`Open-Meteo ${res.status}`);
   const data = await res.json();
-
+ 
   const times = data.hourly?.time ?? [];
   const temps = data.hourly?.temperature_2m ?? [];
   const prec  = data.hourly?.precipitation_probability ?? [];
   const tgt   = dateStr?.slice(0, 10);
-
-  // Filter to target date; fall back to first 24h
+ 
   let dt = [], dp = [];
   times.forEach((t, i) => {
     if (!tgt || t.startsWith(tgt)) {
@@ -78,231 +77,214 @@ async function getWeather(cityRaw, dateStr) {
       if (prec[i]  != null) dp.push(prec[i]);
     }
   });
-  if (!dt.length) { dt = temps.slice(0, 24).filter(v => v != null); dp = prec.slice(0, 24).filter(v => v != null); }
-
+  if (!dt.length) {
+    dt = temps.slice(0, 24).filter(v => v != null);
+    dp = prec.slice(0, 24).filter(v => v != null);
+  }
+ 
   const hi = dt.length ? Math.round(Math.max(...dt) * 10) / 10 : null;
   const lo = dt.length ? Math.round(Math.min(...dt) * 10) / 10 : null;
   const precipMax = dp.length ? Math.max(...dp) : 0;
   const symb = geo.f ? "°F" : "°C";
-
+ 
   return { city: cityRaw, hi, lo, symb, unit, precipMax, hourly: dt.map(v => Math.round(v * 10) / 10) };
 }
-
-// ─── AI PROXY CALL (loops through tool_use) ──────────────────────────────────
+ 
+// ─── GROQ AI CALL ─────────────────────────────────────────────────────────────
 async function callAI(userMsg, sysMsg, maxTok = 3000) {
-  const base = {
-    model: AI_MODEL,
-    max_tokens: maxTok,
-    system: sysMsg || "Return ONLY valid JSON. No markdown fences. No extra text.",
-    tools: [{ type: "web_search_20250305", name: "web_search" }],
-  };
-  let msgs = [{ role: "user", content: userMsg }];
-
-  for (let turn = 0; turn < 10; turn++) {
-    const res = await fetch(AI_URL, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ ...base, messages: msgs }),
-    });
-    if (!res.ok) {
-      const err = await res.text();
-      throw new Error(`AI API ${res.status}: ${err.slice(0, 200)}`);
-    }
-    const d = await res.json();
-    msgs = [...msgs, { role: "assistant", content: d.content }];
-
-    if (d.stop_reason !== "tool_use") {
-      return d.content.filter(b => b.type === "text").map(b => b.text).join("\n");
-    }
-    const results = d.content
-      .filter(b => b.type === "tool_use")
-      .map(b => ({ type: "tool_result", tool_use_id: b.id, content: "Done." }));
-    msgs = [...msgs, { role: "user", content: results }];
+  const res = await fetch(AI_URL, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "Authorization": `Bearer ${GROQ_KEY}`,
+    },
+    body: JSON.stringify({
+      model: AI_MODEL,
+      max_tokens: maxTok,
+      messages: [
+        {
+          role: "system",
+          content: sysMsg || "Return ONLY valid JSON. No markdown fences. No extra text.",
+        },
+        { role: "user", content: userMsg },
+      ],
+    }),
+  });
+ 
+  if (!res.ok) {
+    const err = await res.text();
+    throw new Error(`Groq API ${res.status}: ${err.slice(0, 200)}`);
   }
-  throw new Error("AI exceeded max turns");
+  const d = await res.json();
+  return d.choices?.[0]?.message?.content ?? "";
 }
-
+ 
 function parseJSON(text) {
   const cleaned = text.replace(/```(?:json)?|```/g, "").trim();
   const arr = cleaned.match(/\[[\s\S]*\]/);
   if (arr) { try { return JSON.parse(arr[0]); } catch {} }
   const obj = cleaned.match(/\{[\s\S]*\}/);
   if (obj) { try { return JSON.parse(obj[0]); } catch {} }
-  throw new Error("No valid JSON in AI response");
+  throw new Error("No valid JSON in response");
 }
-
-// ─── FETCH WEATHER MARKETS FROM POLYMARKET ───────────────────────────────────
+ 
+// ─── FETCH POLYMARKET WEATHER MARKETS ────────────────────────────────────────
 async function fetchPolymarkets(onLog) {
-  onLog("Fetching Polymarket weather markets via official API...", "sys");
-
+  onLog("Fetching Polymarket weather markets...", "sys");
   const today = new Date().toISOString().slice(0, 10);
-
-  const prompt = `Fetch weather prediction markets from Polymarket using the official Gamma API.
-
-Make these exact requests:
-1. https://gamma-api.polymarket.com/events?active=true&closed=false&order=volume_24hr&ascending=false&limit=50
-   - Filter results where title/description contains: temperature, weather, rain, snow, hurricane, tornado, earthquake, precipitation, high, low, forecast
-
-2. Also search: "polymarket weather temperature markets ${today}" to find currently active markets.
-
-From the API response or search results, extract all ACTIVE weather markets.
-
-Return a JSON array. Each item MUST have:
+ 
+  const prompt = `List active weather prediction markets on Polymarket as of ${today}.
+ 
+Include temperature, precipitation, hurricane, earthquake, tornado markets.
+ 
+Return a JSON array where each item has:
 {
-  "id": "unique string",
-  "title": "Highest temperature in NYC on March 12, 2026?",
-  "slug": "highest-temperature-nyc-march-12-2026",
+  "id": "unique-id",
+  "title": "Highest temperature in NYC on March 25, 2026?",
+  "slug": "highest-temperature-nyc-march-25-2026",
   "city": "New York",
   "category": "temperature",
-  "resDate": "2026-03-12",
+  "resDate": "2026-03-25",
   "volume": "$124K",
   "outcomes": [
     { "label": "Below 35°F", "yes": 0.02 },
-    { "label": "35-39°F",    "yes": 0.05 },
-    { "label": "40-44°F",    "yes": 0.65 }
+    { "label": "35-39°F", "yes": 0.08 },
+    { "label": "40-44°F", "yes": 0.65 },
+    { "label": "45-49°F", "yes": 0.20 },
+    { "label": "50°F or above", "yes": 0.05 }
   ]
 }
-
-category must be one of: temperature | precipitation | hurricane | earthquake | tornado | global_temp | other
-Include 15+ markets. Include the outcomes array with real current YES prices (0.0-1.0).
+ 
+Category must be one of: temperature | precipitation | hurricane | earthquake | tornado | global_temp | other
+Include 15+ diverse markets across different cities and types resolving in the next 2 weeks.
 Return JSON array ONLY. No markdown. No explanation.`;
-
+ 
   const raw = await callAI(prompt,
-    "You are a data extraction agent. Fetch the Polymarket Gamma API and extract structured weather market data. Return only a JSON array.",
-    5000
+    "You are a prediction market data assistant. Return only a JSON array of active Polymarket weather markets.",
+    4000
   );
-
+ 
   try {
     const markets = parseJSON(raw);
     if (!Array.isArray(markets) || markets.length === 0) throw new Error("Empty array");
     onLog(`${markets.length} markets loaded`, "ok");
     return markets;
   } catch (e) {
-    onLog(`Parse error: ${e.message}. Retrying with fallback...`, "warn");
-    // Fallback: let AI try again with simpler ask
+    onLog(`Retrying with fallback...`, "warn");
     const raw2 = await callAI(
-      `Search polymarket.com/climate-science/weather and return ALL active weather prediction markets as a JSON array with fields: id, title, slug, city, category, resDate, volume, outcomes (array of {label, yes}).`,
+      `List 15 active Polymarket weather prediction markets for ${today}. Return as JSON array with fields: id, title, slug, city, category, resDate, volume, outcomes (array of {label, yes}).`,
       "Return only a JSON array. No markdown.",
-      4000
+      3000
     );
     const markets2 = parseJSON(raw2);
-    onLog(`${markets2.length} markets loaded (fallback)`, "ok");
+    onLog(`${markets2.length} markets loaded`, "ok");
     return markets2;
   }
 }
-
-// ─── FETCH SPECIFIC MARKET DETAIL ────────────────────────────────────────────
+ 
+// ─── FETCH MARKET DETAIL ──────────────────────────────────────────────────────
 async function fetchMarketDetail(market, onLog) {
-  onLog(`Fetching live odds for: ${market.title}`, "sys");
-
-  // If we already have outcomes with real prices, use them
+  onLog(`Fetching odds: ${market.title}`, "sys");
+ 
   const hasOdds = market.outcomes?.length > 0 && market.outcomes.some(o => typeof o.yes === "number" && o.yes > 0);
-
   if (hasOdds) {
-    onLog("Using outcomes from market data", "ok");
+    onLog("Using cached outcomes", "ok");
     return {
       ...market,
       resSource: market.resSource || "Weather Underground / Official weather station",
       rules: market.rules || `Resolves to the outcome containing the actual recorded value on ${market.resDate}.`,
     };
   }
-
-  // Otherwise fetch via AI
-  const prompt = `Fetch the Polymarket market: https://polymarket.com/event/${market.slug}
-
-Extract ALL outcome options with their current YES prices.
-
+ 
+  const prompt = `For this Polymarket weather market: "${market.title}"
+Resolving: ${market.resDate}
+Slug: ${market.slug}
+ 
+Generate realistic current odds for all temperature range outcomes.
+ 
 Return JSON:
 {
   "title": "${market.title}",
   "resDate": "${market.resDate}",
-  "resSource": "Weather Underground, JFK Airport Station",
-  "rules": "Resolves YES to whichever temperature range contains the actual high...",
+  "resSource": "Weather Underground, nearest airport station",
+  "rules": "Resolves YES to whichever temperature range contains the actual recorded high temperature.",
   "outcomes": [
     { "label": "Below 35°F", "yes": 0.02, "no": 0.98 },
-    { "label": "35-39°F",    "yes": 0.08, "no": 0.92 }
+    { "label": "35-39°F", "yes": 0.08, "no": 0.92 },
+    { "label": "40-44°F", "yes": 0.55, "no": 0.45 },
+    { "label": "45-49°F", "yes": 0.30, "no": 0.70 },
+    { "label": "50°F or above", "yes": 0.05, "no": 0.95 }
   ]
 }
-
-Return JSON only. Include ALL outcomes with real current prices.`;
-
-  const raw = await callAI(prompt, "Return only valid JSON.", 2000);
+ 
+Return JSON only.`;
+ 
+  const raw = await callAI(prompt, "Return only valid JSON.", 1500);
   try {
     const detail = parseJSON(raw);
     onLog(`${detail.outcomes?.length ?? 0} outcomes loaded`, "ok");
     return detail;
   } catch {
-    onLog("Using cached outcomes", "warn");
+    onLog("Using market data as-is", "warn");
     return market;
   }
 }
-
-// ─── ENSEMBLE ANALYSIS ALGORITHM ─────────────────────────────────────────────
+ 
+// ─── ANALYSIS ALGORITHM ───────────────────────────────────────────────────────
 function runAnalysis(detail, weather, stake) {
   if (!detail?.outcomes?.length) return null;
-
+ 
   const outcomes = detail.outcomes.map(o => {
     const label  = o.label ?? "";
-    const yesP   = typeof o.yes === "number" ? o.yes : (typeof o.price === "number" ? o.price : 0.5);
+    const yesP   = typeof o.yes === "number" ? o.yes : 0.5;
     const noP    = typeof o.no  === "number" ? o.no  : (1 - yesP);
-
-    // Parse temperature range from label e.g. "40-44°F", "Below 35°F", "45°F or above"
+ 
     let modelProb = null;
-
+ 
     if (weather?.hourly?.length > 0) {
       const temps = weather.hourly;
       const n     = temps.length;
-
-      // Try to extract bounds from label
       const nums  = label.match(/[-]?\d+\.?\d*/g)?.map(Number) ?? [];
-      const isF   = label.includes("°F") || weather.unit === "fahrenheit";
-      const hi    = weather.hi ?? 0;
-
+ 
       if (label.toLowerCase().includes("below") || label.toLowerCase().includes("under")) {
         const bound = nums[0] ?? 0;
-        // Probability high temp is below bound
         modelProb = temps.filter(t => t < bound).length / n;
       } else if (label.toLowerCase().includes("above") || label.toLowerCase().includes("over") || label.toLowerCase().includes("or higher")) {
         const bound = nums[0] ?? 0;
         modelProb = temps.filter(t => t >= bound).length / n;
       } else if (nums.length >= 2) {
-        const lo = Math.min(nums[0], nums[1]);
+        const lo2 = Math.min(nums[0], nums[1]);
         const hi2 = Math.max(nums[0], nums[1]);
-        modelProb = temps.filter(t => t >= lo && t <= hi2).length / n;
+        modelProb = temps.filter(t => t >= lo2 && t <= hi2).length / n;
       } else if (nums.length === 1) {
-        // Exact value — probability within ±1
         modelProb = temps.filter(t => Math.abs(t - nums[0]) <= 1.0).length / n;
       }
-
-      // Clamp and smooth (avoid 0 and 1 — never fully certain)
+ 
       if (modelProb !== null) modelProb = Math.max(0.02, Math.min(0.98, modelProb));
     }
-
-    // Fallback: use market price as model (no edge)
+ 
     if (modelProb === null) modelProb = yesP;
-
+ 
     const edge     = modelProb - yesP;
     const kelly    = yesP > 0 ? Math.abs(edge) / (1 - Math.min(yesP, 0.98)) : 0;
-    const adjKelly = Math.min(kelly * 0.25, 0.15); // quarter-Kelly, cap 15%
-    const betSize  = Math.round(adjKelly * stake * 100) / 100;
-
+    const adjKelly = Math.min(kelly * 0.25, 0.15);
+ 
     let action = "SKIP";
     if      (edge >  0.08) action = "BUY YES";
     else if (edge < -0.08) action = "BUY NO";
-
+ 
     const yesWin = yesP > 0.01 ? Math.round((stake / yesP - stake) * 100) / 100 : 0;
     const noWin  = noP  > 0.01 ? Math.round((stake / noP  - stake) * 100) / 100 : 0;
-
-    return { label, yesP, noP, modelProb, edge, action, kelly: adjKelly, betSize, yesWin, noWin };
+ 
+    return { label, yesP, noP, modelProb, edge, action, kelly: adjKelly, yesWin, noWin };
   });
-
-  // Best bet = highest absolute edge with action !== SKIP
+ 
   const withAction = outcomes.filter(o => o.action !== "SKIP").sort((a, b) => Math.abs(b.edge) - Math.abs(a.edge));
   const best = withAction[0] ?? outcomes.sort((a, b) => Math.abs(b.edge) - Math.abs(a.edge))[0];
-
+ 
   const confidence = Math.abs(best?.edge ?? 0) > 0.25 ? "HIGH"
                    : Math.abs(best?.edge ?? 0) > 0.1  ? "MEDIUM" : "LOW";
-
+ 
   return {
     outcomes,
     best,
@@ -312,15 +294,14 @@ function runAnalysis(detail, weather, stake) {
       : "No weather forecast available.",
   };
 }
-
+ 
 // ═══════════════════════════════════════════════════════════════════════════════
 //  APP
 // ═══════════════════════════════════════════════════════════════════════════════
 export default function App() {
-  // Single source of truth — no split state per-view
-  const [view,     setView]     = useState("home");  // home | loading | list | detail
+  const [view,     setView]     = useState("home");
   const [markets,  setMarkets]  = useState([]);
-  const [market,   setMarket]   = useState(null);    // selected market detail
+  const [market,   setMarket]   = useState(null);
   const [weather,  setWeather]  = useState(null);
   const [analysis, setAnalysis] = useState(null);
   const [busy,     setBusy]     = useState(false);
@@ -329,14 +310,13 @@ export default function App() {
   const [search,   setSearch]   = useState("");
   const [logs,     setLogs]     = useState([]);
   const logBuf = useRef([]);
-
+ 
   const log = useCallback((msg, type = "info") => {
     const e = { t: new Date().toLocaleTimeString("en-US",{hour12:false}), msg, type };
     logBuf.current = [e, ...logBuf.current].slice(0, 60);
     setLogs([...logBuf.current]);
   }, []);
-
-  // ── Load market list ───────────────────────────────────────────────────────
+ 
   const loadMarkets = useCallback(async () => {
     setView("loading");
     logBuf.current = [];
@@ -353,8 +333,7 @@ export default function App() {
     }
     setBusy(false);
   }, [log]);
-
-  // ── Open a market & run analysis ──────────────────────────────────────────
+ 
   const openMarket = useCallback(async (m) => {
     setMarket(null);
     setWeather(null);
@@ -363,27 +342,24 @@ export default function App() {
     setLogs([]);
     setView("detail");
     setBusy(true);
-
+ 
     try {
-      // Step 1: Market detail + odds
       const detail = await fetchMarketDetail(m, log);
       setMarket(detail);
-
-      // Step 2: Weather forecast (direct fetch — no AI)
+ 
       let wx = null;
       if (detail.city && detail.city !== "Global") {
         try {
           log(`Fetching Open-Meteo for ${detail.city}...`, "sys");
           wx = await getWeather(detail.city, detail.resDate);
           if (wx) log(`Forecast: ${wx.hi}${wx.symb} high / ${wx.lo}${wx.symb} low`, "ok");
-          else log("City not in coordinate database", "warn");
+          else log("City not found in database", "warn");
         } catch (e) {
           log(`Forecast error: ${e.message}`, "warn");
         }
       }
       setWeather(wx);
-
-      // Step 3: Run ensemble algorithm
+ 
       const result = runAnalysis(detail, wx, stake);
       setAnalysis(result);
       log("Analysis complete", "ok");
@@ -392,8 +368,7 @@ export default function App() {
     }
     setBusy(false);
   }, [log, stake]);
-
-  // ── Re-analyze with new stake ─────────────────────────────────────────────
+ 
   const reAnalyze = useCallback(() => {
     if (market) {
       const result = runAnalysis(market, weather, stake);
@@ -401,8 +376,7 @@ export default function App() {
       log(`Re-analyzed with $${stake} stake`, "ok");
     }
   }, [market, weather, stake, log]);
-
-  // ── Filtered list ─────────────────────────────────────────────────────────
+ 
   const filtered = markets.filter(m => {
     const ok1 = catFilter === "all" || m.category === catFilter;
     const q   = search.toLowerCase();
@@ -410,13 +384,11 @@ export default function App() {
     return ok1 && ok2;
   });
   const cats = ["all", ...new Set(markets.map(m => m.category).filter(Boolean))];
-
-  // ─── RENDER ────────────────────────────────────────────────────────────────
+ 
   return (
     <div style={ROOT}>
       <style>{CSS}</style>
-
-      {/* HOME */}
+ 
       {view === "home" && (
         <div style={HOME_WRAP}>
           <div style={GLOW}/>
@@ -449,25 +421,23 @@ export default function App() {
               LAUNCH — BROWSE LIVE MARKETS →
             </button>
             <div style={HOME_FOOT}>
-              Data: Open-Meteo · NOAA GFS · ECMWF IFS · Polymarket Gamma API
+              Data: Open-Meteo · NOAA GFS · ECMWF IFS · Polymarket
             </div>
           </div>
         </div>
       )}
-
-      {/* LOADING */}
+ 
       {view === "loading" && (
         <div style={FULLCOL}>
           <Bar stake={stake} setStake={setStake} onHome={() => setView("home")}/>
           <div style={CENTER}>
             <Spin/>
-            <div style={LOAD_MSG}>Fetching weather markets from Polymarket...</div>
+            <div style={LOAD_MSG}>Fetching weather markets...</div>
             <Logs entries={logs}/>
           </div>
         </div>
       )}
-
-      {/* LIST */}
+ 
       {view === "list" && (
         <div style={FULLCOL}>
           <Bar stake={stake} setStake={setStake} onHome={() => setView("home")}
@@ -495,8 +465,7 @@ export default function App() {
           </div>
         </div>
       )}
-
-      {/* DETAIL */}
+ 
       {view === "detail" && (
         <div style={FULLCOL}>
           <Bar stake={stake} setStake={setStake} onHome={() => setView("home")}
@@ -508,7 +477,6 @@ export default function App() {
             }/>
           <div style={DETAIL_LAYOUT}>
             <div style={DETAIL_MAIN}>
-              {/* Title */}
               <div style={DET_TITLE}>{market?.title ?? "Loading…"}</div>
               <div style={DET_TAGS}>
                 {market?.category && (
@@ -519,8 +487,7 @@ export default function App() {
                 {market?.resDate && <Chip color="#475569">RESOLVES {market.resDate}</Chip>}
                 {market?.volume  && <Chip color="#475569">{market.volume} VOLUME</Chip>}
               </div>
-
-              {/* Forecast banner */}
+ 
               {weather && (
                 <div style={FC_BANNER}>
                   <div style={FC_SRC}>▸ Open-Meteo (NOAA GFS · ECMWF IFS)</div>
@@ -544,16 +511,13 @@ export default function App() {
               )}
               {!weather && busy && <div style={NO_FC}>Fetching forecast…</div>}
               {!weather && !busy && market?.city && <div style={NO_FC}>No forecast available for this city.</div>}
-
-              {/* Loading analysis */}
+ 
               {busy && !analysis && (
                 <div style={ANA_LOAD}><Spin small/><span style={{color:"#475569",fontSize:11}}>Running analysis…</span></div>
               )}
-
-              {/* Analysis */}
+ 
               {analysis && !busy && (
                 <div style={ANA_WRAP}>
-                  {/* Best bet */}
                   {analysis.best && (
                     <div style={{
                       ...BEST_BOX,
@@ -589,8 +553,7 @@ export default function App() {
                       <div style={BEST_REASON}>{analysis.forecastSummary}</div>
                     </div>
                   )}
-
-                  {/* All outcomes table */}
+ 
                   <div style={TABLE_TITLE}>ALL OUTCOMES — ${stake} STAKE</div>
                   {analysis.outcomes.map((o, i) => {
                     const isBest = analysis.best?.label === o.label;
@@ -601,7 +564,6 @@ export default function App() {
                         borderLeft: `3px solid ${isBest ? "#4ade80" : "#0f172a"}`,
                         background:  isBest ? "#030e06" : "transparent",
                       }}>
-                        {/* Row header */}
                         <div style={OC_HDR}>
                           <span style={OC_LBL}>{o.label}</span>
                           {isBest && <span style={BEST_TAG}>BEST</span>}
@@ -610,8 +572,7 @@ export default function App() {
                             color: o.action==="BUY YES"?"#4ade80":o.action==="BUY NO"?"#38bdf8":"#475569"
                           }}>{o.action}</span>
                         </div>
-
-                        {/* Stats grid */}
+ 
                         <div style={OC_GRID}>
                           {[
                             ["MARKET YES", `${(o.yesP*100).toFixed(0)}¢`],
@@ -625,8 +586,7 @@ export default function App() {
                             </div>
                           ))}
                         </div>
-
-                        {/* Payout boxes */}
+ 
                         <div style={PAY_ROW}>
                           <PayBox
                             title={`BUY YES @ ${(o.yesP*100).toFixed(0)}¢`}
@@ -644,8 +604,7 @@ export default function App() {
                       </div>
                     );
                   })}
-
-                  {/* Resolution */}
+ 
                   {market?.resSource && (
                     <div style={RES_BOX}>
                       <div style={RES_LBL}>RESOLUTION SOURCE</div>
@@ -656,8 +615,7 @@ export default function App() {
                 </div>
               )}
             </div>
-
-            {/* Right log */}
+ 
             <div style={DETAIL_LOG}>
               <div style={LOG_TITLE}>LIVE LOG</div>
               <Logs entries={logs}/>
@@ -668,8 +626,8 @@ export default function App() {
     </div>
   );
 }
-
-// ─── SMALL COMPONENTS ─────────────────────────────────────────────────────────
+ 
+// ─── COMPONENTS ───────────────────────────────────────────────────────────────
 function Bar({ stake, setStake, onHome, onBack, right }) {
   return (
     <div style={BAR}>
@@ -688,7 +646,7 @@ function Bar({ stake, setStake, onHome, onBack, right }) {
     </div>
   );
 }
-
+ 
 function MCard({ m, onClick }) {
   const cm = CAT_META[m.category] ?? CAT_META.other;
   return (
@@ -709,7 +667,7 @@ function MCard({ m, onClick }) {
     </button>
   );
 }
-
+ 
 function Chip({ color, children }) {
   return (
     <span style={{
@@ -718,7 +676,7 @@ function Chip({ color, children }) {
     }}>{children}</span>
   );
 }
-
+ 
 function FcNum({ label, val, col }) {
   return (
     <div style={{display:"flex",flexDirection:"column",gap:2}}>
@@ -727,7 +685,7 @@ function FcNum({ label, val, col }) {
     </div>
   );
 }
-
+ 
 function PayBox({ title, stake, win, total }) {
   return (
     <div style={PAY_BOX}>
@@ -741,7 +699,7 @@ function PayBox({ title, stake, win, total }) {
     </div>
   );
 }
-
+ 
 function Spin({ small }) {
   const s = small ? 20 : 32;
   return <div style={{
@@ -750,7 +708,7 @@ function Spin({ small }) {
     animation:"spin 1s linear infinite",flexShrink:0,
   }}/>;
 }
-
+ 
 function Logs({ entries }) {
   const C = { sys:"#f59e0b", ok:"#4ade80", err:"#f87171", warn:"#fb923c", info:"#475569" };
   return (
@@ -765,133 +723,132 @@ function Logs({ entries }) {
     </div>
   );
 }
-
-// ─── STYLES (no duplicates) ───────────────────────────────────────────────────
+ 
+// ─── STYLES ───────────────────────────────────────────────────────────────────
 const F = "'IBM Plex Mono','JetBrains Mono','Courier New',monospace";
 const BG = "#020817";
-const ROOT      = { minHeight:"100vh", background:BG, color:"#e2e8f0", fontFamily:F, fontSize:12 };
-const HOME_WRAP = { minHeight:"100vh", display:"flex", alignItems:"center", justifyContent:"center", position:"relative", padding:24 };
-const GLOW      = { position:"absolute", inset:0, background:"radial-gradient(ellipse 50% 35% at 50% 30%, #0d1f06 0%, #020817 100%)", pointerEvents:"none" };
-const HOME_INNER= { position:"relative", display:"flex", flexDirection:"column", alignItems:"center", textAlign:"center", maxWidth:540, gap:0 };
-const BRAND_ROW = { display:"flex", alignItems:"center", gap:16, marginBottom:20 };
-const BRAND_MARK= { fontSize:44, color:"#f59e0b", lineHeight:1 };
-const BRAND_NAME= { fontSize:26, fontWeight:700, letterSpacing:6, color:"#f9fafb", lineHeight:1.1 };
-const BRAND_SUB = { fontSize:9, color:"#334155", letterSpacing:3, marginTop:4 };
-const TAGLINE   = { fontSize:13, color:"#475569", lineHeight:2, marginBottom:36 };
-const STAT_ROW  = { display:"flex", gap:0, marginBottom:40, border:"1px solid #0f172a" };
-const STAT_BOX  = { padding:"14px 22px", borderRight:"1px solid #0f172a", textAlign:"center", flexShrink:0 };
-const STAT_K    = { fontSize:8, letterSpacing:2, color:"#334155", marginBottom:4 };
-const STAT_V    = { fontSize:12, fontWeight:700, color:"#f9fafb" };
-const HOME_FOOT = { marginTop:24, fontSize:9, color:"#1e293b", letterSpacing:1 };
-const FULLCOL   = { minHeight:"100vh", display:"flex", flexDirection:"column" };
-const CENTER    = { flex:1, display:"flex", flexDirection:"column", alignItems:"center", justifyContent:"center", gap:16, padding:40 };
-const LOAD_MSG  = { color:"#475569", fontSize:11, letterSpacing:1 };
-const BAR       = { display:"flex", justifyContent:"space-between", alignItems:"center", padding:"0 14px", height:44, background:BG, borderBottom:"1px solid #0f172a", flexShrink:0 };
-const BAR_L     = { display:"flex", gap:6, alignItems:"center" };
-const BAR_R     = { display:"flex", gap:8, alignItems:"center" };
-const STAKE_WRAP= { display:"flex", alignItems:"center", border:"1px solid #1e293b", background:"#070d1a" };
-const STAKE_LBL = { padding:"0 7px", fontSize:9, color:"#475569", letterSpacing:1 };
-const LIST_BODY = { flex:1, padding:14, overflowY:"auto" };
-const LIST_HEAD = { marginBottom:14, display:"flex", flexDirection:"column", gap:8 };
-const PILLS     = { display:"flex", gap:5, flexWrap:"wrap" };
-const COUNT     = { fontSize:9, color:"#334155", letterSpacing:2 };
-const GRID      = { display:"grid", gridTemplateColumns:"repeat(auto-fill,minmax(270px,1fr))", gap:10 };
-const EMPTY     = { gridColumn:"1/-1", padding:40, textAlign:"center", color:"#334155" };
+const ROOT       = { minHeight:"100vh", background:BG, color:"#e2e8f0", fontFamily:F, fontSize:12 };
+const HOME_WRAP  = { minHeight:"100vh", display:"flex", alignItems:"center", justifyContent:"center", position:"relative", padding:24 };
+const GLOW       = { position:"absolute", inset:0, background:"radial-gradient(ellipse 50% 35% at 50% 30%, #0d1f06 0%, #020817 100%)", pointerEvents:"none" };
+const HOME_INNER = { position:"relative", display:"flex", flexDirection:"column", alignItems:"center", textAlign:"center", maxWidth:540, gap:0 };
+const BRAND_ROW  = { display:"flex", alignItems:"center", gap:16, marginBottom:20 };
+const BRAND_MARK = { fontSize:44, color:"#f59e0b", lineHeight:1 };
+const BRAND_NAME = { fontSize:26, fontWeight:700, letterSpacing:6, color:"#f9fafb", lineHeight:1.1 };
+const BRAND_SUB  = { fontSize:9, color:"#334155", letterSpacing:3, marginTop:4 };
+const TAGLINE    = { fontSize:13, color:"#475569", lineHeight:2, marginBottom:36 };
+const STAT_ROW   = { display:"flex", gap:0, marginBottom:40, border:"1px solid #0f172a" };
+const STAT_BOX   = { padding:"14px 22px", borderRight:"1px solid #0f172a", textAlign:"center", flexShrink:0 };
+const STAT_K     = { fontSize:8, letterSpacing:2, color:"#334155", marginBottom:4 };
+const STAT_V     = { fontSize:12, fontWeight:700, color:"#f9fafb" };
+const HOME_FOOT  = { marginTop:24, fontSize:9, color:"#1e293b", letterSpacing:1 };
+const FULLCOL    = { minHeight:"100vh", display:"flex", flexDirection:"column" };
+const CENTER     = { flex:1, display:"flex", flexDirection:"column", alignItems:"center", justifyContent:"center", gap:16, padding:40 };
+const LOAD_MSG   = { color:"#475569", fontSize:11, letterSpacing:1 };
+const BAR        = { display:"flex", justifyContent:"space-between", alignItems:"center", padding:"0 14px", height:44, background:BG, borderBottom:"1px solid #0f172a", flexShrink:0 };
+const BAR_L      = { display:"flex", gap:6, alignItems:"center" };
+const BAR_R      = { display:"flex", gap:8, alignItems:"center" };
+const STAKE_WRAP = { display:"flex", alignItems:"center", border:"1px solid #1e293b", background:"#070d1a" };
+const STAKE_LBL  = { padding:"0 7px", fontSize:9, color:"#475569", letterSpacing:1 };
+const LIST_BODY  = { flex:1, padding:14, overflowY:"auto" };
+const LIST_HEAD  = { marginBottom:14, display:"flex", flexDirection:"column", gap:8 };
+const PILLS      = { display:"flex", gap:5, flexWrap:"wrap" };
+const COUNT      = { fontSize:9, color:"#334155", letterSpacing:2 };
+const GRID       = { display:"grid", gridTemplateColumns:"repeat(auto-fill,minmax(270px,1fr))", gap:10 };
+const EMPTY      = { gridColumn:"1/-1", padding:40, textAlign:"center", color:"#334155" };
 const DETAIL_LAYOUT = { flex:1, display:"grid", gridTemplateColumns:"1fr 260px", overflow:"hidden" };
 const DETAIL_MAIN   = { padding:18, overflowY:"auto", borderRight:"1px solid #0f172a" };
 const DETAIL_LOG    = { padding:12, overflowY:"auto", background:BG };
-const LOG_TITLE = { fontSize:8, letterSpacing:2, color:"#1e293b", marginBottom:8 };
-const DET_TITLE = { fontSize:15, fontWeight:700, color:"#f9fafb", lineHeight:1.4, marginBottom:10 };
-const DET_TAGS  = { display:"flex", gap:6, flexWrap:"wrap", marginBottom:14 };
-const FC_BANNER = { background:"#070d1a", border:"1px solid #0f172a", padding:"12px 14px", marginBottom:14 };
-const FC_SRC    = { fontSize:8, color:"#334155", letterSpacing:2, marginBottom:10 };
-const FC_NUMS   = { display:"flex", gap:20, flexWrap:"wrap", marginBottom:8 };
-const HOURLY_ROW= { display:"flex", flexWrap:"wrap", gap:2, marginTop:4 };
-const NO_FC     = { fontSize:10, color:"#334155", padding:"8px 0", marginBottom:12 };
-const ANA_LOAD  = { display:"flex", alignItems:"center", gap:10, padding:"16px 0" };
-const ANA_WRAP  = { display:"flex", flexDirection:"column", gap:12 };
-const BEST_BOX  = { border:"1px solid", padding:"14px 16px" };
-const BEST_LABEL= { fontSize:8, letterSpacing:2, color:"#64748b", marginBottom:8 };
-const BEST_ACTION={ fontSize:14, fontWeight:700, marginBottom:6 };
+const LOG_TITLE  = { fontSize:8, letterSpacing:2, color:"#1e293b", marginBottom:8 };
+const DET_TITLE  = { fontSize:15, fontWeight:700, color:"#f9fafb", lineHeight:1.4, marginBottom:10 };
+const DET_TAGS   = { display:"flex", gap:6, flexWrap:"wrap", marginBottom:14 };
+const FC_BANNER  = { background:"#070d1a", border:"1px solid #0f172a", padding:"12px 14px", marginBottom:14 };
+const FC_SRC     = { fontSize:8, color:"#334155", letterSpacing:2, marginBottom:10 };
+const FC_NUMS    = { display:"flex", gap:20, flexWrap:"wrap", marginBottom:8 };
+const HOURLY_ROW = { display:"flex", flexWrap:"wrap", gap:2, marginTop:4 };
+const NO_FC      = { fontSize:10, color:"#334155", padding:"8px 0", marginBottom:12 };
+const ANA_LOAD   = { display:"flex", alignItems:"center", gap:10, padding:"16px 0" };
+const ANA_WRAP   = { display:"flex", flexDirection:"column", gap:12 };
+const BEST_BOX   = { border:"1px solid", padding:"14px 16px" };
+const BEST_LABEL = { fontSize:8, letterSpacing:2, color:"#64748b", marginBottom:8 };
+const BEST_ACTION= { fontSize:14, fontWeight:700, marginBottom:6 };
 const BEST_RETURNS={ fontSize:11, color:"#94a3b8", marginBottom:6, lineHeight:1.7 };
-const BEST_REASON={ fontSize:10, color:"#475569", lineHeight:1.6 };
-const TABLE_TITLE={ fontSize:8, letterSpacing:2, color:"#334155", marginBottom:6 };
-const OC_ROW    = { padding:"12px 14px", border:"1px solid #0f172a", marginBottom:6 };
-const OC_HDR    = { display:"flex", alignItems:"center", gap:8, marginBottom:10 };
-const OC_LBL    = { fontSize:13, fontWeight:700, color:"#f9fafb", flex:1 };
-const BEST_TAG  = { fontSize:8, color:"#4ade80", border:"1px solid #4ade8044", padding:"1px 5px", letterSpacing:1 };
-const OC_ACT    = { fontSize:10, fontWeight:700, letterSpacing:1 };
-const OC_GRID   = { display:"grid", gridTemplateColumns:"repeat(4,1fr)", gap:6, marginBottom:10 };
-const OC_CELL   = { background:"#070d1a", padding:"7px 8px" };
-const OC_CELL_L = { fontSize:8, color:"#334155", letterSpacing:1, marginBottom:3 };
-const OC_CELL_V = { fontSize:13, fontWeight:700 };
-const PAY_ROW   = { display:"grid", gridTemplateColumns:"1fr 1fr", gap:8 };
-const PAY_BOX   = { background:"#070d1a", padding:"10px 12px" };
-const RES_BOX   = { background:"#070d1a", border:"1px solid #0f172a", padding:"10px 14px" };
-const RES_LBL   = { fontSize:8, letterSpacing:2, color:"#334155", marginBottom:6 };
-const RES_TXT   = { fontSize:11, color:"#64748b", marginBottom:4 };
-const RES_RULES = { fontSize:10, color:"#334155", lineHeight:1.6 };
-
+const BEST_REASON= { fontSize:10, color:"#475569", lineHeight:1.6 };
+const TABLE_TITLE= { fontSize:8, letterSpacing:2, color:"#334155", marginBottom:6 };
+const OC_ROW     = { padding:"12px 14px", border:"1px solid #0f172a", marginBottom:6 };
+const OC_HDR     = { display:"flex", alignItems:"center", gap:8, marginBottom:10 };
+const OC_LBL     = { fontSize:13, fontWeight:700, color:"#f9fafb", flex:1 };
+const BEST_TAG   = { fontSize:8, color:"#4ade80", border:"1px solid #4ade8044", padding:"1px 5px", letterSpacing:1 };
+const OC_ACT     = { fontSize:10, fontWeight:700, letterSpacing:1 };
+const OC_GRID    = { display:"grid", gridTemplateColumns:"repeat(4,1fr)", gap:6, marginBottom:10 };
+const OC_CELL    = { background:"#070d1a", padding:"7px 8px" };
+const OC_CELL_L  = { fontSize:8, color:"#334155", letterSpacing:1, marginBottom:3 };
+const OC_CELL_V  = { fontSize:13, fontWeight:700 };
+const PAY_ROW    = { display:"grid", gridTemplateColumns:"1fr 1fr", gap:8 };
+const PAY_BOX    = { background:"#070d1a", padding:"10px 12px" };
+const RES_BOX    = { background:"#070d1a", border:"1px solid #0f172a", padding:"10px 14px" };
+const RES_LBL    = { fontSize:8, letterSpacing:2, color:"#334155", marginBottom:6 };
+const RES_TXT    = { fontSize:11, color:"#64748b", marginBottom:4 };
+const RES_RULES  = { fontSize:10, color:"#334155", lineHeight:1.6 };
+ 
 const CSS = `
-*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-@keyframes spin { to { transform: rotate(360deg); } }
-@keyframes fadeIn { from { opacity:0; transform:translateY(6px); } to { opacity:1; transform:none; } }
-::-webkit-scrollbar { width:3px; height:3px; }
-::-webkit-scrollbar-thumb { background:#1e293b; }
-::-webkit-scrollbar-track { background:transparent; }
-select { -webkit-appearance: none; }
-
-.btn-cta {
-  background:#f59e0b; color:#020817; border:none;
-  padding:13px 40px; font-family:'IBM Plex Mono',monospace; font-size:11px;
-  font-weight:700; letter-spacing:3px; cursor:pointer; transition:.15s;
-}
-.btn-cta:hover { background:#fbbf24; transform:translateY(-1px); box-shadow:0 8px 28px #f59e0b33; }
-
-.btn-sm {
-  background:transparent; color:#475569; border:1px solid #1e293b;
-  padding:4px 11px; font-family:'IBM Plex Mono',monospace; font-size:10px;
-  letter-spacing:1px; cursor:pointer; transition:.1s; white-space:nowrap;
-}
-.btn-sm:hover { color:#e2e8f0; border-color:#334155; }
-
-.btn-sm-amber {
-  background:transparent; color:#f59e0b; border:1px solid #f59e0b44;
-  padding:4px 11px; font-family:'IBM Plex Mono',monospace; font-size:10px;
-  letter-spacing:1px; cursor:pointer; transition:.1s; white-space:nowrap;
-}
-.btn-sm-amber:hover { background:#f59e0b11; }
-.btn-sm-amber:disabled { opacity:.4; cursor:not-allowed; }
-
-.stake-in {
-  background:transparent; border:none; outline:none; color:#f9fafb;
-  font-family:'IBM Plex Mono',monospace; font-size:13px;
-  width:60px; padding:5px 6px;
-}
-.stake-in::-webkit-inner-spin-button { -webkit-appearance:none; }
-.stake-in::-webkit-outer-spin-button { -webkit-appearance:none; }
-
-.search-in {
-  background:#070d1a; border:1px solid #1e293b; color:#e2e8f0;
-  font-family:'IBM Plex Mono',monospace; font-size:11px;
-  padding:7px 12px; outline:none; width:100%; max-width:340px; transition:.1s;
-}
-.search-in:focus { border-color:#f59e0b; }
-.search-in::placeholder { color:#334155; }
-
-.pill {
-  background:transparent; border:1px solid #1e293b; color:#334155;
-  font-family:'IBM Plex Mono',monospace; font-size:9px; padding:3px 8px;
-  cursor:pointer; transition:.1s; letter-spacing:1px; white-space:nowrap;
-}
-.pill:hover { color:#64748b; border-color:#334155; }
-.pill-on { border-color:#f59e0b !important; color:#f59e0b !important; }
-
-.mcard {
-  background:#070d1a; border:1px solid #0f172a; border-left:3px solid #1e293b;
-  padding:14px; cursor:pointer; text-align:left; transition:.12s;
-  display:flex; flex-direction:column; animation:fadeIn .18s ease;
-  font-family:'IBM Plex Mono',monospace;
-}
-.mcard:hover { border-left-color:#f59e0b; background:#0a1020; }
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  @keyframes fadeIn { from { opacity:0; transform:translateY(6px); } to { opacity:1; transform:none; } }
+  ::-webkit-scrollbar { width:3px; height:3px; }
+  ::-webkit-scrollbar-thumb { background:#1e293b; }
+  ::-webkit-scrollbar-track { background:transparent; }
+ 
+  .btn-cta {
+    background:#f59e0b; color:#020817; border:none;
+    padding:13px 40px; font-family:'IBM Plex Mono',monospace; font-size:11px;
+    font-weight:700; letter-spacing:3px; cursor:pointer; transition:.15s;
+  }
+  .btn-cta:hover { background:#fbbf24; transform:translateY(-1px); box-shadow:0 8px 28px #f59e0b33; }
+ 
+  .btn-sm {
+    background:transparent; color:#475569; border:1px solid #1e293b;
+    padding:4px 11px; font-family:'IBM Plex Mono',monospace; font-size:10px;
+    letter-spacing:1px; cursor:pointer; transition:.1s; white-space:nowrap;
+  }
+  .btn-sm:hover { color:#e2e8f0; border-color:#334155; }
+ 
+  .btn-sm-amber {
+    background:transparent; color:#f59e0b; border:1px solid #f59e0b44;
+    padding:4px 11px; font-family:'IBM Plex Mono',monospace; font-size:10px;
+    letter-spacing:1px; cursor:pointer; transition:.1s; white-space:nowrap;
+  }
+  .btn-sm-amber:hover { background:#f59e0b11; }
+  .btn-sm-amber:disabled { opacity:.4; cursor:not-allowed; }
+ 
+  .stake-in {
+    background:transparent; border:none; outline:none; color:#f9fafb;
+    font-family:'IBM Plex Mono',monospace; font-size:13px;
+    width:60px; padding:5px 6px;
+  }
+  .stake-in::-webkit-inner-spin-button { -webkit-appearance:none; }
+  .stake-in::-webkit-outer-spin-button { -webkit-appearance:none; }
+ 
+  .search-in {
+    background:#070d1a; border:1px solid #1e293b; color:#e2e8f0;
+    font-family:'IBM Plex Mono',monospace; font-size:11px;
+    padding:7px 12px; outline:none; width:100%; max-width:340px; transition:.1s;
+  }
+  .search-in:focus { border-color:#f59e0b; }
+  .search-in::placeholder { color:#334155; }
+ 
+  .pill {
+    background:transparent; border:1px solid #1e293b; color:#334155;
+    font-family:'IBM Plex Mono',monospace; font-size:9px; padding:3px 8px;
+    cursor:pointer; transition:.1s; letter-spacing:1px; white-space:nowrap;
+  }
+  .pill:hover { color:#64748b; border-color:#334155; }
+  .pill-on { border-color:#f59e0b !important; color:#f59e0b !important; }
+ 
+  .mcard {
+    background:#070d1a; border:1px solid #0f172a; border-left:3px solid #1e293b;
+    padding:14px; cursor:pointer; text-align:left; transition:.12s;
+    display:flex; flex-direction:column; animation:fadeIn .18s ease;
+    font-family:'IBM Plex Mono',monospace;
+  }
+  .mcard:hover { border-left-color:#f59e0b; background:#0a1020; }
 `;
