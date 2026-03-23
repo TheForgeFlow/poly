@@ -310,9 +310,7 @@ export default function App() {
   const [search,   setSearch]   = useState("");
   const [logs,     setLogs]     = useState([]);
   const logBuf = useRef([]);
- const [unlocked, setUnlocked] = useState(false);
-const [pw, setPw] = useState("");
-const SECRET = "edge2026";
+ 
 
 
  
