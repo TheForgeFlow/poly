@@ -310,6 +310,48 @@ export default function App() {
   const [search,   setSearch]   = useState("");
   const [logs,     setLogs]     = useState([]);
   const logBuf = useRef([]);
+ const [unlocked, setUnlocked] = useState(false);
+const [pw, setPw] = useState("");
+const SECRET = "edge2026";
+
+if (!unlocked) {
+  return (
+    <div style={{
+      minHeight:"100vh", background:"#020817",
+      display:"flex", alignItems:"center", justifyContent:"center",
+      flexDirection:"column", gap:16, fontFamily:"'IBM Plex Mono',monospace"
+    }}>
+      <div style={{fontSize:22, color:"#f59e0b", letterSpacing:4}}>◈ POLYMARKET EDGE</div>
+      <div style={{fontSize:11, color:"#475569", letterSpacing:2}}>ENTER ACCESS CODE</div>
+      <input
+        type="password"
+        value={pw}
+        onChange={e => setPw(e.target.value)}
+        onKeyDown={e => e.key==="Enter" && pw===SECRET && setUnlocked(true)}
+        style={{
+          background:"#070d1a", border:"1px solid #1e293b",
+          color:"#f9fafb", padding:"8px 14px",
+          fontFamily:"'IBM Plex Mono',monospace", fontSize:13,
+          outline:"none", textAlign:"center", letterSpacing:4
+        }}
+        placeholder="••••••••"
+        autoFocus
+      />
+      <button
+        onClick={() => pw===SECRET && setUnlocked(true)}
+        style={{
+          background:"#f59e0b", color:"#020817", border:"none",
+          padding:"8px 28px", fontFamily:"'IBM Plex Mono',monospace",
+          fontSize:11, fontWeight:700, letterSpacing:2, cursor:"pointer"
+        }}>
+        ENTER →
+      </button>
+      {pw.length > 0 && pw !== SECRET && (
+        <div style={{fontSize:10, color:"#f87171"}}>Invalid code</div>
+      )}
+    </div>
+  );
+}
  
   const log = useCallback((msg, type = "info") => {
     const e = { t: new Date().toLocaleTimeString("en-US",{hour12:false}), msg, type };
